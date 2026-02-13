@@ -6,9 +6,10 @@ import type { BacktestRunSpec, DatasetInfo, RunStatus } from '@tradingbot/core-t
 type Props = {
   datasets: DatasetInfo[];
   onCreateRun: (spec: BacktestRunSpec) => Promise<RunStatus>;
+  onDatasetSelected?: (datasetId: string) => void;
 };
 
-export function RunBuilder({ datasets, onCreateRun }: Props) {
+export function RunBuilder({ datasets, onCreateRun, onDatasetSelected }: Props) {
   const [selected, setSelected] = useState<string>('');
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
 
@@ -41,7 +42,10 @@ export function RunBuilder({ datasets, onCreateRun }: Props) {
         id="dataset-select"
         className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
         value={selected}
-        onChange={(event) => setSelected(event.target.value)}
+        onChange={(event) => {
+          setSelected(event.target.value);
+          onDatasetSelected?.(event.target.value);
+        }}
       >
         {datasets.map((dataset) => (
           <option key={dataset.id} value={dataset.id}>

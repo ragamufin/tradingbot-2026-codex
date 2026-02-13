@@ -17,6 +17,7 @@ export function App() {
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [runs, setRuns] = useState<RunStatus[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>('');
+  const [selectedSeriesCount, setSelectedSeriesCount] = useState<number>(0);
   const [latestProposal, setLatestProposal] = useState<DeploymentProposal | null>(null);
 
   useEffect(() => {
@@ -25,6 +26,13 @@ export function App() {
       setSelectedDataset(result[0]?.id ?? '');
     });
   }, []);
+
+  useEffect(() => {
+    if (!selectedDataset) return;
+    void window.tradingbot
+      .loadSeries({ legacyDbPath: DEFAULT_LEGACY_DB_PATH, datasetId: selectedDataset, limit: 500 })
+      .then((series) => setSelectedSeriesCount(series.length));
+  }, [selectedDataset]);
 
   const onCreateRun = async (spec: unknown) => {
     const created = await window.tradingbot.createRun(spec);
@@ -71,13 +79,22 @@ export function App() {
       {appHeader}
       <main className="grid grid-cols-12 gap-4 p-4">
         <section className="col-span-8 space-y-4">
-          <TradingViewChart title={selectedDataset || 'TradingView Local Chart'} />
+          <TradingViewChart
+            title={selectedDataset || 'TradingView Local Chart'}
+          />
+          <p className="text-sm text-slate-600" data-testid="series-count">
+            Mock series points loaded: {selectedSeriesCount}
+          </p>
           <TestRunHistory runs={runs} />
         </section>
 
         <section className="col-span-4 space-y-4">
           <StrategyConfigPanel onValidate={(draft) => window.tradingbot.validateConfig(draft)} />
-          <RunBuilder datasets={datasets} onCreateRun={onCreateRun} />
+          <RunBuilder
+            datasets={datasets}
+            onCreateRun={onCreateRun}
+            onDatasetSelected={(datasetId) => setSelectedDataset(datasetId)}
+          />
           <DeploymentPanel
             onCreate={async (input) => {
               const proposal = await window.tradingbot.createProposal(input);

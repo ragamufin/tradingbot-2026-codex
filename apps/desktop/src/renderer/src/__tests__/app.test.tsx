@@ -10,7 +10,7 @@ beforeEach(() => {
       { id: '1h::BTC/USDT', ticker: 'BTC/USDT', timeframe: '1h', points: 100 },
       { id: '1h::ETH/USDT', ticker: 'ETH/USDT', timeframe: '1h', points: 100 }
     ]),
-    loadSeries: vi.fn().mockResolvedValue([]),
+    loadSeries: vi.fn().mockResolvedValue([{ time: 1, open: 1, high: 1, low: 1, close: 1, volume: 1 }]),
     validateConfig: vi.fn().mockResolvedValue({ valid: true, errors: [] }),
     createRun: vi.fn().mockResolvedValue({ runId: 'run-1', status: 'queued', progress: 0 }),
     getRunStatus: vi.fn().mockResolvedValue({ runId: 'run-1', status: 'completed', progress: 100 }),
@@ -48,6 +48,10 @@ describe('desktop app', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Backtest Run Builder')).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('series-count')).toHaveTextContent('Mock series points loaded: 1');
     });
   });
 });
