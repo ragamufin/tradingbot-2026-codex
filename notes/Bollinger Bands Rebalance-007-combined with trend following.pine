@@ -1,0 +1,546 @@
+//@version=6
+// Rebalance based on Bollinger Bands
+
+strategy(shorttitle="BB Reb", title="Bollinger Bands Rebalance", overlay=true, close_entries_rule="ANY", fill_orders_on_standard_ohlc=true, process_orders_on_close=true, precision=8, initial_capital=10000, pyramiding=10000, margin_long=0)
+
+enum BAND_TYPE
+    bollinger = 'Bollinger Bands'
+    keltner = 'Keltner Channel'
+    donchian = 'Donchian Channel'
+
+enum TREND_MA_TYPE
+    ema = 'EMA'
+    sma = 'SMA'
+    wma = 'WMA'
+    hull = 'HULL'
+
+enum TREND_CHANGE_TYPE
+    openAndClose = 'OPEN+CLOSE'
+    close = 'CLOSE'
+    highAndLow = 'HIGH+LOW'
+
+bandsUse = input.bool(true, "Use Bands?", display=display.none, group="Bands")
+src = input.source(close, group="Bands", display=display.data_window)
+bandType = input.enum(BAND_TYPE.donchian, "Band Type", group="Bands", display=display.data_window)
+length = input.int(20, group="Bands", display=display.data_window, minval=1)
+mult = input.float(1.0, group="Bands", display=display.data_window, minval=0.001, maxval=50)
+
+trendUse = input.bool(true, "Use Trend?", display=display.none, group="Trend")
+trendMaType = input.enum(TREND_MA_TYPE.hull, "MA Type", group="Trend")
+trendMaLen = input.int(300, "MA length", group="Trend", display=display.data_window, minval=1, maxval=5000)
+trendChangeType = input.enum(TREND_CHANGE_TYPE.openAndClose, "Switch Trend direction when price above/below based on", display=display.data_window, group="Trend")
+trendDirChangeWithMa = input.bool(false, "Switch Detrended MA Direction when underlying MA changes direction?", display=display.data_window, group="Trend")
+trendMaUpSrc = input.source(close, "Move detrended MA up based on", display=display.data_window, group="Trend")
+trendMaDownSrc = input.source(close, "Move detrended MA down based on", display=display.data_window, group="Trend")
+
+bandsTrendRatio = input.float(50.0, "If using both Bands and Trend, percent of cash to allocate to bands", group="Strategy Settings", display=display.data_window, minval=0.0, maxval=100)/100
+cashRatioUpper = input.float(70.0, "Percent to keep in cash at the upper line", group="Strategy Settings", display=display.data_window, minval=0.0, maxval=100)/100
+cashRatioLower = input.float(30.0, "Percent to keep in cash at the lower line", group="Strategy Settings", display=display.data_window, minval=0.0, maxval=100)/100
+minOrderCash = input.float(100.0, "No less than this $ amount per order", group="Strategy Settings", display=display.data_window, minval=0.00001)
+minOrderCashRatio = input.float(1.0, "No less than this % of available $ per order", group="Strategy Settings", display=display.data_window, minval=0.00001)/100
+shouldCloseInProfit = input.bool(true, "Only close positions in profit", group="Strategy Settings", display=display.data_window)
+shouldAlternateTrades = input.bool(true, "Only trade if other side of bands hit", group="Strategy Settings", display=display.data_window)
+assetRatioStart = input.float(0.0, "Percent (if any) of cash to allocate to the asset at the very start before lines are hit", group="Strategy Settings", display=display.data_window, minval=0.0, maxval=100)/100
+// shouldAllocateImmediately = input.bool(true, "Allocate funds immediately", group="Strategy Settings", display=display.data_window)
+
+// start and end time
+time_start_use = input.bool(true, "Use Start Date?", display=display.none, group="Start/End Date")
+time_start = input.time(timestamp("1 Dec 2018 00:00"), "Start Date", group="Start/End Date")
+// time_start = input.time(timestamp("26 Dec 2017 00:00"), "Start Date", group="Start/End Date")
+time_end_use = input.bool(false, "Use End Date?", display=display.none, group="Start/End Date")
+time_end = input.time(timestamp("4 May 2022 00:00"), "End Date", group="Start/End Date")
+
+// Plots
+showTrendMa = input.bool(true, "Show actual trend MA?", display=display.none, group="Plots")
+show_pnl_chars = input.bool(true, "Show character for Profit/Loss/Break-even on closed trades?", group="Plots")
+show_equity_curve = input.bool(false, "Plot equity curve?", group="Plots")
+
+// types
+type ma_state
+	bool has_started = false
+	int dir = 0 					// 0 = initial, 1 = above, -1 = below
+	bool dir_has_changed = false
+	bool is_overlapping = false
+	color color = color.white
+	float value = na
+	float low// = low
+	float high// = high
+
+// constants
+const color COLOR_NEUTRAL = color.white
+const color COLOR_BULLISH = color.lime
+const color COLOR_BEARISH = #FF0000
+
+const string TREND_POSITION_ID = 'long#trend'
+
+fn_formatQuote(float amount) =>
+    (math.floor(amount * syminfo.pricescale))/syminfo.pricescale
+    // (math.floor(amount * 100))/100
+
+// vars
+var initial_capital = strategy.initial_capital
+var mincontract = syminfo.mincontract
+var mintick = syminfo.mintick
+var is_past_start_date = false
+var is_past_end_date = false
+var bool hasStarted = false
+// var assetRatioUpper2 = 1 - cashRatioUpper
+// var assetRatioLower2 = 1 - cashRatioLower
+var canTradeUpper = true
+var canTradeLower = true
+
+var ma_info = ma_state.new()
+var d_ma_info = ma_state.new()
+var trendHasPosition = false
+var trendCapitalHeld = 0.0
+var trendPositionSize = 0.0
+var trendNetProfit = 0.0
+var bandsRatio = bandsUse ? (trendUse ? bandsTrendRatio : 1) : 0
+var trendRatio = trendUse ? (bandsUse ? 1 - bandsRatio : 1) : 0
+
+opentrades = strategy.opentrades
+openprofit = strategy.openprofit
+netprofit = strategy.netprofit
+equity = strategy.equity
+closedtrades = strategy.closedtrades
+position_size = strategy.position_size
+avg_price = strategy.position_avg_price
+is_long = strategy.position_size > 0
+is_short = strategy.position_size < 0
+capital_held = strategy.opentrades.capital_held
+asset_value = math.abs(position_size) * close
+
+assetCost = capital_held
+current_capital = (strategy.initial_capital + netprofit) - assetCost
+// current_capital = fn_formatQuote((strategy.initial_capital + netprofit) - assetCost)
+
+assetRatio = current_capital / equity
+asset2CashRatio = 1 - assetRatio
+
+minOrderCash_contract = minOrderCash / src
+minOrderCashRatio_contract = (minOrderCashRatio * current_capital) / src
+assetMinOrderContract = math.max(mincontract, minOrderCash_contract, minOrderCashRatio_contract)
+
+if(not is_past_start_date)
+    is_past_start_date := not time_start_use or time >= time_start
+if(not is_past_end_date)
+    is_past_end_date := time_end_use and time > time_end
+
+didOpenBandsTrades = false
+didCloseBandsTrades = false
+didOpenTrendTrades = false
+didCloseTrendTrades = false
+
+newClosedTrades = closedtrades - closedtrades[1]
+newOpenTrades = (opentrades + newClosedTrades) - opentrades[1]
+if(newOpenTrades > 0)
+    for i = opentrades[1] to opentrades - 1
+        if(strategy.opentrades.entry_id(i) != TREND_POSITION_ID)
+            didOpenBandsTrades := true
+            continue
+
+        trendHasPosition := true    
+        didOpenTrendTrades := true
+        trendPositionSize += strategy.opentrades.size(i)
+        trendCapitalHeld += strategy.opentrades.size(i) * strategy.opentrades.entry_price(i)
+        break
+
+if(newClosedTrades > 0)
+    for i = closedtrades[1] to closedtrades - 1
+        if(strategy.closedtrades.entry_id(i) != TREND_POSITION_ID)
+            didCloseBandsTrades := true
+            continue
+            
+        trendHasPosition := false
+        didCloseTrendTrades := true
+        trendPositionSize -= strategy.closedtrades.size(i)
+        trendCapitalHeld -= strategy.closedtrades.size(i) * strategy.closedtrades.entry_price(i)
+        trendNetProfit += strategy.closedtrades.profit(i)
+        break
+
+bandsPositionSize = position_size - trendPositionSize
+bandsNetProfit = netprofit - trendNetProfit
+bandsCapitalHeld = capital_held - trendCapitalHeld
+totalCapital = current_capital + capital_held
+// totalCapital := fn_formatQuote(current_capital + capital_held)
+// trendCapitalTarget = trendRatio * totalCapital
+trendCapitalHeldRatio = nz(trendCapitalHeld / capital_held, 0)
+bandsCapitalHeldRatio = nz(bandsCapitalHeld / capital_held, 0)
+// trendCapitalRatio = not trendUse ? 0 : trendRatio - nz(trendCapitalHeld / totalCapital, 0) + nz(bandsCapitalHeld / totalCapital, 0)
+trendCapitalRatio = not trendUse ? 0 : math.max(trendRatio - nz(trendCapitalHeld / totalCapital, 0), 0)
+// trendCapitalRatio := math.min(trendCapitalRatio, 1)
+trendCapitalAvailable = math.min(trendCapitalRatio * totalCapital, current_capital)
+bandsCapitalRatio = 1 - trendCapitalRatio
+// trendCapitalAvailable = trendCapitalRatio * current_capital
+// trendCapitalAvailable := fn_formatQuote(trendCapitalAvailable)
+bandsCapitalAvailable = current_capital - trendCapitalAvailable
+// bandsCapitalAvailable := fn_formatQuote(bandsCapitalAvailable)
+
+// Trend
+method is_price_above(ma_state ln) => ln.dir == 1
+method is_price_below(ma_state ln) => ln.dir == -1
+method is_overlapping(ma_state ln) => ln.is_overlapping
+
+method update_color(ma_state ln) => 
+	if(not ln.is_overlapping)
+		ln.color := ln.is_price_above() ? color.lime : color.red
+
+	ln
+	
+method update_direction(ma_state ln, TREND_CHANGE_TYPE dir_change_type) =>
+	dir_prev = ln.dir
+	value = ln.value
+	max_open_close = math.max(open, close)
+	min_open_close = math.min(open, close)
+
+	ln.dir := switch dir_change_type
+		TREND_CHANGE_TYPE.close => close > value ? 1 : close < value ? -1 : dir_prev
+		TREND_CHANGE_TYPE.openAndClose => min_open_close > value ? 1 : max_open_close < value ? -1 : dir_prev
+		TREND_CHANGE_TYPE.highAndLow => low > value ? 1 : high < value ? -1 : dir_prev
+
+	ln.is_overlapping := switch dir_change_type
+		TREND_CHANGE_TYPE.highAndLow => high >= value and low <= value
+		=> max_open_close >= value and min_open_close <= value
+
+	ln.dir_has_changed := dir_prev != 0 and ln.dir != dir_prev
+	if(not ln.has_started and ln.dir_has_changed)
+		ln.has_started := true
+
+	ln
+
+method detrend(ma_state d_ln, ma_state ln, bool dir_change_with_ma, float up_src, float down_src) =>
+	if(dir_change_with_ma)
+		d_ln.dir_has_changed := ln.dir_has_changed
+		if(d_ln.dir_has_changed)
+			d_ln.is_overlapping := ln.is_overlapping
+			d_ln.dir := ln.dir
+
+	if(not ln.has_started)
+		d_ln.value := ln.value
+    else
+        d_ln_low_prev = d_ln.low
+        d_ln_high_prev = d_ln.high
+
+        if(d_ln.dir_has_changed)
+            if(d_ln.is_price_above())
+                d_ln.high := math.max(up_src, up_src[1])
+            else
+                d_ln.low := math.min(down_src, down_src[1])
+        else
+            d_ln.high := ln.value >= up_src ? d_ln.high : math.max(up_src, nz(d_ln.high, high))
+            d_ln.low := ln.value <= down_src ? d_ln.low : math.min(down_src, nz(d_ln.low, low))
+
+        if(d_ln.dir == ln.dir and (
+              (d_ln.is_price_above() and (
+              (d_ln.high > d_ln_high_prev and ln.value > d_ln.value) or 
+              (d_ln.dir_has_changed and ln.value < d_ln.value)
+              )) 
+              or 
+              (d_ln.is_price_below() and (
+              (d_ln.low < d_ln_low_prev and ln.value < d_ln.value) or 
+              (d_ln.dir_has_changed and ln.value > d_ln.value) ))
+          )
+          )	
+            d_ln.value := ln.value
+
+	ln
+
+fn_update_ma_info(
+      ma_state ma_info,
+      ma_state d_ma_info,
+      // ma
+      float ma_value,
+	  // ma direction settings
+	  TREND_CHANGE_TYPE dir_change_type, 
+	  // detrended ma settings
+	  bool d_ma_dir_change_with_ma,
+	  float up_src, float down_src) =>
+	
+	ma_info.value := ma_value
+	ma_info.update_direction(dir_change_type)
+	ma_info.update_color()
+
+	d_ma_info.value := nz(d_ma_info.value, ma_info.value)
+	d_ma_info.update_direction(dir_change_type)
+	d_ma_info.detrend(ma_info, d_ma_dir_change_with_ma, up_src, down_src)
+	d_ma_info.update_color()
+
+ma = switch trendMaType
+    TREND_MA_TYPE.sma => ta.sma(src, trendMaLen)
+    TREND_MA_TYPE.wma => ta.wma(src, trendMaLen)
+    TREND_MA_TYPE.hull => ta.hma(src, trendMaLen)
+    => ta.ema(src, trendMaLen) // default to EMA
+
+fn_update_ma_info(
+  // ma settings
+  ma_info, d_ma_info, ma, 
+  // detrended ma settings
+  trendChangeType, 
+  trendDirChangeWithMa,
+  trendMaUpSrc, trendMaDownSrc)
+
+// Bands
+[middle_bb, upper_bb, lower_bb] = ta.bb(src, length, mult)
+[middle_kc, upper_kc, lower_kc] = ta.kc(src, length, mult)
+lower_dc =  ta.lowest(length)
+upper_dc =  ta.highest(length)
+// diff_dc = ((upper_dc - lower_dc) / 2) * (mult - 1)
+// upper_dc += diff_dc
+// lower_dc -= diff_dc
+middle_dc =  math.avg(upper_dc, lower_dc)
+
+middle = bandType == BAND_TYPE.keltner ? middle_kc : bandType == BAND_TYPE.donchian ? middle_dc : middle_bb
+upper = bandType == BAND_TYPE.keltner ? upper_kc : bandType == BAND_TYPE.donchian ? upper_dc : upper_bb
+lower = bandType == BAND_TYPE.keltner ? lower_kc : bandType == BAND_TYPE.donchian ? lower_dc : lower_bb
+
+// targetUpper = na(upper[1]) ? upper : upper + (upper - upper[1])
+// targetLower = na(lower[1]) ? lower : lower + (lower - lower[1])
+// targetUpper = na(upper[2]) ? upper : math.max(upper, upper[1] + (upper[1] - upper[2]))
+// targetLower = na(lower[2]) ? lower : math.min(lower, lower[1] + (lower[1] - lower[2]))
+targetUpper = upper
+targetLower = lower
+if(not na(upper[1]))
+    targetUpper := math.max(upper, upper + (upper - upper[1]), close + mintick)
+    targetLower := math.min(lower, lower + (lower - lower[1]), close - mintick)
+
+// isBelowUpper = targetUpper > high
+// isAboveLower = targetLower < low
+isBelowUpper = targetUpper > close
+isAboveLower = targetLower < close
+
+// canTradeUpper := low <= math.max(targetLower, targetLower[1]) or canTradeUpper
+// canTradeUpper := position_size > position_size[1] or low <= math.max(targetLower, targetLower[1]) or canTradeUpper
+// canTradeUpper := closedtrades > closedtrades[1] ? false : (opentrades > opentrades[1] or canTradeUpper)
+// canTradeUpper := closedtrades > closedtrades[1] ? false : (low <= math.max(targetLower, targetLower[1]) or canTradeUpper)
+
+// didCloseTrades = closedtrades > closedtrades[1]
+// didOpenTrades = opentrades > opentrades[1]
+
+didTouchUpper = high >= targetUpper[1]
+didTouchLower = low <= targetLower[1]
+// didTouchUpper := didTouchUpper or closedtrades > closedtrades[1]
+// didTouchLower := didTouchLower or opentrades > opentrades[1]
+// didTouchUpper = (opentrades + closedtrades) > 0 ? closedtrades > closedtrades[1] : high >= targetUpper[1]
+// didTouchLower = (opentrades + closedtrades) > 0 ? opentrades > opentrades[1] : low <= targetLower[1]
+canTradeUpper := didCloseBandsTrades ? false : (didTouchLower or canTradeUpper)
+canTradeLower := didOpenBandsTrades ? false : (didTouchUpper or canTradeLower)
+
+lowerBandsAssetValue = math.abs(bandsPositionSize) * targetLower
+lowerBandsTotalValue = lowerBandsAssetValue + bandsCapitalAvailable
+lowerBandsCashRatio = bandsCapitalAvailable / lowerBandsTotalValue
+lowerBandsCashRatioSurplus = lowerBandsCashRatio - cashRatioLower
+lowerBandsContracts = ( (lowerBandsCashRatioSurplus / lowerBandsCashRatio) * bandsCapitalAvailable )  / targetLower
+
+upperBandsAssetValue = math.abs(bandsPositionSize) * targetUpper
+upperBandsTotalValue = upperBandsAssetValue + bandsCapitalAvailable
+upperBandsCashRatio = bandsCapitalAvailable / upperBandsTotalValue
+upperBandsCashRatioSurplus = upperBandsCashRatio - cashRatioUpper
+// upperBandsContracts = -(upperBandsCashRatioSurplus * bandsCapitalAvailable) / targetUpper
+// upperBandsContracts = -( (upperBandsCashRatioSurplus / upperBandsCashRatio) * bandsCapitalAvailable )  / targetUpper
+upperBandsContracts = nz(-( (upperBandsCashRatioSurplus / upperBandsCashRatio) * bandsCapitalAvailable )  / targetUpper, upperBandsTotalValue)
+
+// strategy
+shouldBuyLower = isAboveLower and lowerBandsContracts > assetMinOrderContract and (not shouldAlternateTrades or canTradeLower)
+shouldSellUpper = isBelowUpper and upperBandsContracts > assetMinOrderContract and (not shouldAlternateTrades or canTradeUpper)
+// shouldBuyLower = lowerBandsContracts > assetMinOrderContract and (not shouldAlternateTrades or canTradeLower)
+// shouldSellUpper = upperBandsContracts > assetMinOrderContract and (not shouldAlternateTrades or canTradeUpper)
+
+// numOpenBuyOrders = 0
+// numBandsSellOrders = 0
+// numTrendBuyOrders = 0.0
+
+shouldProcesOrders = is_past_start_date and not is_past_end_date
+shouldProcesOrders := shouldProcesOrders and (not bandsUse or (middle > 0 and upper > 0 and lower > 0))
+shouldProcesOrders := shouldProcesOrders and (not trendUse or not na(d_ma_info.value))
+
+if(shouldProcesOrders)
+    if(assetRatioStart > 0 and not hasStarted)
+        targetAssetAmount = assetRatioStart * current_capital
+        numOrders = math.floor(targetAssetAmount / (assetMinOrderContract * src))
+        if(numOrders > 0)
+            hasStarted := true
+            // canTradeUpper := true
+            // canTradeLower := true
+            for i = 0 to numOrders - 1
+                qty = assetMinOrderContract
+                order_id_buy = "buy_" + str.tostring(bar_index) + "_" + str.tostring(i)
+                strategy.entry(order_id_buy, strategy.long, qty=qty)
+    else
+        if(bandsUse)
+            strategy.cancel_all()
+            if(shouldBuyLower)
+                numOrders = math.floor(lowerBandsContracts / assetMinOrderContract)
+                if(numOrders > 0)
+                    for i = 0 to numOrders - 1
+                        qty = assetMinOrderContract
+                        order_id_buy = str.tostring(bar_index) + "_" + str.tostring(i)
+                        strategy.entry(order_id_buy, strategy.long, qty=qty, limit=targetLower)
+                        // numOpenBuyOrders += 1
+
+            if(shouldSellUpper)
+                numOrders = opentrades
+                if(numOrders > 0)
+                    upperBandsContractsRemaining = upperBandsContracts
+                    for i = 0 to numOrders - 1
+                        if(strategy.opentrades.entry_id(i) == TREND_POSITION_ID)
+                            continue
+                        orderSize = strategy.opentrades.size(i)
+                        shouldClose = orderSize <= upperBandsContractsRemaining
+                        if(shouldClose and shouldCloseInProfit)
+                            shouldClose := strategy.opentrades.entry_price(i) < targetUpper
+                        if(shouldClose)
+                            upperBandsContractsRemaining -= orderSize
+                            order_id_buy = strategy.opentrades.entry_id(i)
+                            order_id_exit = "sell_" + order_id_buy
+                            strategy.exit(order_id_exit, order_id_buy, limit=targetUpper)
+                            // numBandsSellOrders += 1
+        
+        if(trendUse and d_ma_info.dir_has_changed)
+            
+            if(d_ma_info.is_price_above() and not trendHasPosition)
+                // buy_capital = current_capital// * (1 / (num_mas - opentrades))
+                // buy_capital = fn_formatQuote(current_capital)
+                // buy_capital = current_capital
+                buy_capital = trendCapitalAvailable
+                // buy_capital := (strategy.equity - strategy.openprofit)
+                buy_qty = buy_capital / close
+                // buy_qty = buy_capital / (close + mintick)
+                // buy_qty = fn_formatQuote(buy_capital) / fn_formatQuote(close)
+                // buy_qty = fn_formatQuote(buy_capital) / close
+                // buy_qty := fn_formatQuote(buy_qty)
+                // buy_qty := math.round_to_mintick(buy_qty)
+                // if(buy_qty == 7311.8094)
+                //     buy_qty := 7311.56
+                // buy_qty1 = str.tonumber(str.format('{0,number,#.##}', buy_capital))
+                // buy_qty = (buy_capital*0.9999) / close
+                // if(buy_qty == 1.5727294696805894)
+                //     buy_qty := 1.57272857
+                strategy.entry(TREND_POSITION_ID, strategy.long, qty=buy_qty)
+                // numTrendBuyOrders := buy_qty
+                // trendHasPosition := true
+            
+            else if(d_ma_info.is_price_below() and trendHasPosition)
+                strategy.close(TREND_POSITION_ID, immediately=true)
+                // trendHasPosition := false
+                
+
+// plots
+
+var colorMiddle = COLOR_NEUTRAL
+colorMiddle := low > middle ? COLOR_BULLISH : high < middle ? COLOR_BEARISH : colorMiddle
+// colorMiddle := math.min(open, close) > middle ? COLOR_BULLISH : math.max(open, close) < middle ? COLOR_BEARISH : colorMiddle
+// colorMiddle = src >= middle ? COLOR_BULLISH : COLOR_BEARISH
+
+pUpper = plot(upper, title="upper", color=color.blue)
+// pUpper1 = plot(upper1, title="upper1", color=color.blue, style=plot.style_circles)
+pBasis = plot(middle, title="middle", linewidth=2, color=colorMiddle)
+// pLower1 = plot(lower1, title="lower1", color=color.orange, style=plot.style_circles)
+pLower = plot(lower, title="lower", color=color.orange)
+// plot(targetUpper, title="upperBands target", color=color.white, style=plot.style_circles)
+
+fill(pBasis,pUpper, color=color.new(color.blue, 80))
+// fill(pUpper1, pUpper2, color=color.new(color.blue, 80))
+fill(pBasis,pLower, color=color.new(color.orange, 80))
+// fill(pLower1, pLower2, color=color.new(color.orange, 80))
+
+plot(trendUse ? ma_info.value : na, title="MA", linewidth=2, color=ma_info.color, display=showTrendMa ? display.pane+display.data_window : display.data_window)
+plot(trendUse ? d_ma_info.value : na, title="detrended MA", linewidth=2, color=d_ma_info.color)
+// plotchar(d_ma_info.low, title="d_ma_info.low", char="", location=location.top, color=color.aqua, display=display.data_window)
+// plotchar(d_ma_info.high, title="d_ma_info.high", char="", location=location.top, color=color.maroon, display=display.data_window)
+// plotchar(bar_index > 1 ? (d_ma_info[1]).high : na, title="d_ma_info[1].high", char="", location=location.top, color=color.maroon, display=display.data_window)
+// plotchar(d_ma_info.dir_has_changed, title="d_ma_info.dir_has_changed", char="", location=location.top, color=d_ma_info.dir_has_changed ? color.green : color.white, display=display.data_window)
+// plotchar(d_ma_info.has_started, title="d_ma_info.has_started", char="", location=location.top, color=d_ma_info.dir_has_changed ? color.green : color.white, display=display.data_window)
+// plotchar(bar_index, title="bar_index", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(strategy.opentrades.capital_held, title="opentrades.capital_held", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(totalCapital, title="totalCapital", char="", location=location.top, color=totalCapital > 0 ? COLOR_BULLISH : color.white, display=display.data_window)
+plotchar(trendCapitalHeld, title="trendCapitalHeld", char="", location=location.top, color=trendCapitalHeld > 0 ? COLOR_BULLISH : color.white, display=display.data_window)
+plotchar(bandsCapitalHeld, title="bandsCapitalHeld", char="", location=location.top, color=bandsCapitalHeld > 0? COLOR_BULLISH :color.white, display=display.data_window)
+plotchar(trendCapitalRatio, title="trendCapitalRatio", char="", location=location.top, color=trendCapitalRatio > 0? COLOR_BULLISH :color.white, display=display.data_window)
+plotchar(bandsCapitalRatio, title="bandsCapitalRatio", char="", location=location.top, color=bandsCapitalRatio > 0? COLOR_BULLISH :color.white, display=display.data_window)
+plotchar(trendCapitalAvailable, title="trendCapitalAvailable", char="", location=location.top, color=trendCapitalAvailable > 0? COLOR_BULLISH :color.white, display=display.data_window)
+plotchar(bandsCapitalAvailable, title="bandsCapitalAvailable", char="", location=location.top, color=bandsCapitalAvailable > 0? COLOR_BULLISH :color.white, display=display.data_window)
+
+// plotchar(numBandsSellOrders, title="numBandsSellOrders", char="", location=location.top, color=numBandsSellOrders > 0 ? color.red : color.white, display=display.data_window)
+// plotchar(trendHasPosition, title="trendHasPosition", char="", location=location.top, color=trendHasPosition ? COLOR_BULLISH : color.white, display=display.data_window)
+plotchar(close, title="close", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(fn_formatBase(close), title="fn_formatBase(close)", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(numTrendBuyOrders, title="numTrendBuyOrders", char="", location=location.top, color=numTrendBuyOrders > 0 ? COLOR_BULLISH : color.white, display=display.data_window)
+// plotchar(trendCapitalAvailable / close, title="trendCapitalAvailable / close", char="", location=location.top, color=numTrendBuyOrders > 0 ? COLOR_BULLISH : color.white, display=display.data_window)
+// plotchar(numTrendBuyOrders * close, title="numTrendBuyOrders * close", char="", location=location.top, color=numTrendBuyOrders > 0 ? COLOR_BULLISH : color.white, display=display.data_window)
+// plotchar(current_capital / close, title="buy_qty", char="", location=location.top, color=color.fuchsia, display=display.data_window)
+
+bandsAssetCost = bandsPositionSize * close
+bandsEquity = bandsAssetCost + bandsCapitalAvailable
+bandsAssetRatio = bandsCapitalAvailable / bandsEquity
+bandsAsset2CashRatio = 1 - bandsAssetRatio
+plotchar(bandsAssetCost, title="bands asset_value", char="", location=location.top, color=color.aqua, display=display.data_window)
+plotchar(bandsAssetRatio * 100, title="bands % in cash $", char="", location=location.top, color=color.aqua, display=display.data_window)
+plotchar(bandsAsset2CashRatio * 100, title="bands % in asset", char="", location=location.top, color=color.aqua, display=display.data_window)
+
+plotchar(bandsNetProfit, title="bands netprofit", char="", location=location.top, color=color.green, display=display.data_window)
+plotchar(trendNetProfit, title="trend netprofit", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(targetLower, title="targetLower", char="", location=location.top, color=color.aqua, display=display.data_window)
+plotchar(targetUpper, title="targetUpper", char="", location=location.top, color=color.orange, display=display.data_window)
+// plotchar(lowerBandsContracts, title="lowerBandsContracts", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(lowerBandsCashRatioSurplus, title="lowerBandsCashRatioSurplus", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(upperBandsCashRatioSurplus, title="upperBandsCashRatioSurplus", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar((upperBandsCashRatioSurplus / upperBandsCashRatio), title="TEST", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(upperBandsCashRatio, title="upperBandsCashRatio", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(upperBandsContracts, title="upperBandsContracts", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(didTouchUpper, title="didTouchUpper", char="", location=location.top, color=didTouchUpper ? color.orange : color.white, display=display.data_window)
+// plotchar(didTouchLower, title="didTouchLower", char="", location=location.top, color=didTouchLower ? color.orange : color.white, display=display.data_window)
+// plotchar(opentrades, title="closedtrades", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(opentrades[1], title="opentrades[1]", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(newOpenTrades, title="newOpenTrades", char="", location=location.top, color=newOpenTrades > 0 ? color.orange : color.white, display=display.data_window)
+// plotchar(newClosedTrades, title="newClosedTrades", char="", location=location.top, color=newClosedTrades > 0 ? color.orange : color.white, display=display.data_window)
+// plotchar(didOpenBandsTrades, title="didOpenBandsTrades", char="", location=location.top, color=didOpenBandsTrades ? color.orange : color.white, display=display.data_window)
+plotchar(canTradeUpper, title="canTradeUpper", char="", location=location.top, color=canTradeUpper ? color.orange : color.white, display=display.data_window)
+plotchar(canTradeLower, title="canTradeLower", char="", location=location.top, color=canTradeLower ? color.orange : color.white, display=display.data_window)
+// plotchar(numOpenBuyOrders, title="numOpenBuyOrders", char="", location=location.top, color=didTouchLower ? color.green : color.white, display=display.data_window)
+
+
+
+// if(bar_index == 3656)
+//     s1 = str.format('{0,number,currency}', current_capital)
+//     label.new(bar_index, close, text=s1)
+// plotchar(str.tonumber(str.split(str.format('{0,number,currency}', current_capital), '$').get(0)), title="TEST", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(fn_formatQuote(current_capital), title="TEST", char="", location=location.top, color=color.white, display=display.data_window)
+
+plot(syminfo.mintick, title="syminfo.mintick", color=color.white, display=display.data_window)
+// plot(syminfo.mincontract, title="syminfo.mincontract", color=color.white, display=display.data_window)
+// plot(syminfo.pointvalue, title="syminfo.pointvalue", color=color.white, display=display.data_window)
+plot(syminfo.minmove, title="syminfo.minmove", color=color.white, display=display.data_window)
+plot(syminfo.pricescale, title="syminfo.pricescale", color=color.white, display=display.data_window)
+
+plotchar(opentrades, title="opentrades", char="", location=location.top, color=color.yellow, display=display.data_window)
+plotchar(position_size, title="position_size", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(avg_price, title="avg_price", char="", location=location.top, color=close > avg_price ? COLOR_BULLISH : close < avg_price ? COLOR_BEARISH : COLOR_NEUTRAL, display=display.data_window)
+
+plotchar(assetCost, title="assetCost", char="", location=location.top, color=color.blue, display=display.data_window)
+plotchar(current_capital, title="cash $", char="", location=location.top, color=color.green, display=display.data_window)
+plotchar(asset_value, title="asset_value", char="", location=location.top, color=color.aqua, display=display.data_window)
+plotchar(assetRatio * 100, title="% in cash $", char="", location=location.top, color=color.aqua, display=display.data_window)
+plotchar(asset2CashRatio * 100, title="% in asset", char="", location=location.top, color=color.aqua, display=display.data_window)
+plotchar(openprofit, title="openprofit", char="", location=location.top, color=openprofit > 0 ? COLOR_BULLISH : openprofit < 0 ? COLOR_BEARISH : COLOR_NEUTRAL, display=display.data_window)
+plotchar(equity, title="equity", char="", location=location.top, color=color.yellow, display=display.data_window)
+// plotchar(current_capital + asset_value, title="current_capital + asset_value", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(netprofit, title="netprofit", char="", location=location.top, color=color.green, display=display.data_window)
+
+// assetAmount = assetRatio * initial_capital
+// assetMinOrderContract = math.max(mincontract, minOrderRatio)
+// numOrders = math.floor(assetAmount / (assetMinOrderContract * src))
+
+// plotchar(mintick, title="mintick", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(mincontract, title="mincontract", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(minOrderCash_contract, title="minOrderCash_contract", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(minOrderCashRatio_contract, title="minOrderCashRatio_contract", char="", location=location.top, color=color.green, display=display.data_window)
+// plotchar(assetMinOrderContract, title="assetMinOrderContract", char="", location=location.top, color=color.green, display=display.data_window)
+
+plotchar(show_pnl_chars and netprofit > netprofit[1], title="Closed in Profit Character", char="$", location=location.bottom, color=color.lime, size=size.tiny, display=display.pane)
+// plotchar(show_pnl_chars and pnl_changed and netprofit == netprofit[1], title="Closed at Break-even Character", char="0", location=location.bottom, color=color.silver, size=size.tiny, display=display.pane)
+plotchar(show_pnl_chars and closedtrades > closedtrades[1] and netprofit == netprofit[1], title="Closed at Break-even Character", char="0", location=location.bottom, color=color.silver, size=size.tiny, display=display.pane)
+plotchar(show_pnl_chars and not na(netprofit[1]) and netprofit < netprofit[1], title="Closed at Loss Character", char="L", location=location.bottom, color=color.fuchsia, size=size.tiny, display=display.pane)
+
+var color equity_color = na
+equity_color := color.new(equity > equity[1] ? color.aqua : equity < equity[1] ? color.fuchsia : equity_color[1], 90)
+plot(show_equity_curve ? equity : na, title="Equity Curve", color=equity_color, linewidth=2, style=plot.style_areabr, display=display.pane+display.data_window)

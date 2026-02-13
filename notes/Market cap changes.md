@@ -1,0 +1,1 @@
+App to let you know when the market cap rises or falls by a certain amount/percent

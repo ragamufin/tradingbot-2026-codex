@@ -1,0 +1,1 @@
+App to let you know when new coins are listed on exchanges

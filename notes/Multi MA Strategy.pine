@@ -1,0 +1,531 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ragamufin
+// Detrended MA that tries to avoid overlapping with price
+//@version=5
+strategy("Multi MA Strategy", overlay=true, precision=8, initial_capital=10000, process_orders_on_close=true, close_entries_rule="ANY", default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.0, pyramiding=1000)//, margin_long=10000, margin_short=10000)
+
+// MA 1 Settings ---
+// ma1_src = input.source(hl2, "MA1 source", group="MA 1 Settings", display=display.data_window)
+// ma_src_1_bak = input(hl2, "MA 1 source", group="MA 1 Settings", display=display.data_window)
+ma_use_1 = input.bool(true, "Use MA 1?", display=display.none, group="MA 1 Settings")
+ma_sec_1 = input.symbol("", title="MA Symbol", group="MA 1 Settings", display=display.data_window)
+ma_src_1 = input.source(close, "MA source", group="MA 1 Settings", display=display.data_window)
+ma_tf_1 = input.timeframe("", "MA Timeframe", group="MA 1 Settings", display=display.data_window)
+ma_type_1 = input.string("HULL", "MA Type", group="MA 1 Settings", options=["EMA", "SMA", "WMA", "KAMA", "HULL"])
+ma_len_1 = input.int(300, "MA length", group="MA 1 Settings", display=display.data_window, minval=1, maxval=5000) // KAMA: 5000 
+kama_fast_len_1 = input.int(2, "MA fast length (if KAMA)", display=display.data_window, group="MA 1 Settings", minval=1, maxval=5000) // 6
+kama_slow_len_1 = input.int(26, "MA slow length (if KAMA)", display=display.data_window, group="MA 1 Settings", minval=1, maxval=5000)
+
+// dir_change_type_1 = input.string("HIGH+LOW", "Switch MA direction when price above/below based on", group="MA 1 Settings", options = ["CLOSE", "OPEN+CLOSE", "HIGH+LOW"])
+dir_change_type_1 = input.string("OPEN+CLOSE", "Switch MA direction when price above/below based on", display=display.data_window, group="MA 1 Settings", options = ["CLOSE", "OPEN+CLOSE", "HIGH+LOW"])
+d_ma_dir_change_with_ma_1 = input.bool(false, "Switch Detrended MA Direction when underlying MA changes direction?", display=display.data_window, group="MA 1 Settings")
+d_ma_up_src_1 = input.source(close, "Move detrended MA up based on", display=display.data_window, group="MA 1 Settings")
+d_ma_down_src_1 = input.source(close, "Move detrended MA down based on", display=display.data_window, group="MA 1 Settings")
+// color_bg_on_crossover = input.bool(false, "Color background on crossover")
+// color_bg_after_crossover = input.bool(true, "Color background after crossover")
+
+allow_short_1 = input.bool(false, "Allow shorting", display=display.data_window, group="MA 1 Settings")
+
+// MA 2 Settings ---
+// ma1_src = input.source(hl2, "MA1 source", group="MA 1 Settings", display=display.data_window)
+// ma_src_2_bak = input(hl2, "MA 2 source", group="MA 2 Settings", display=display.data_window)
+ma_use_2 = input.bool(false, "Use MA 2?", display=display.none, group="MA 2 Settings")
+ma_sec_2 = input.symbol("", title="MA Symbol", group="MA 2 Settings", display=display.data_window)
+ma_src_2 = input.source(close, "MA source", display=display.data_window, group="MA 2 Settings")
+ma_tf_2 = input.timeframe("D", "MA Timeframe", group="MA 2 Settings", display=display.data_window)
+ma_type_2 = input.string("HULL", "MA Type", group="MA 2 Settings", options=["EMA", "SMA", "WMA", "KAMA", "HULL"])
+ma_len_2 = input.int(300, "MA length", display=display.data_window, group="MA 2 Settings", minval=1, maxval=5000) // KAMA: 5000 
+kama_fast_len_2 = input.int(2, "MA fast length (if KAMA)", display=display.data_window, group="MA 2 Settings", minval=1, maxval=5000) // 6
+kama_slow_len_2 = input.int(26, "MA slow length (if KAMA)", display=display.data_window, group="MA 2 Settings", minval=1, maxval=5000)
+
+// dir_change_type = input.string("HIGH+LOW", "Switch MA direction when price above/below based on", group="MA 2 Settings", options = ["CLOSE", "OPEN+CLOSE", "HIGH+LOW"])
+dir_change_type_2 = input.string("OPEN+CLOSE", "Switch MA direction when price above/below based on", display=display.data_window, group="MA 2 Settings", options = ["CLOSE", "OPEN+CLOSE", "HIGH+LOW"])
+d_ma_dir_change_with_ma_2 = input.bool(false, "Switch Detrended MA Direction when underlying MA changes direction?", display=display.data_window, group="MA 2 Settings")
+d_ma_up_src_2 = input.source(close, "Move detrended MA up based on", display=display.data_window, group="MA 2 Settings")
+d_ma_down_src_2 = input.source(close, "Move detrended MA down based on", display=display.data_window, group="MA 2 Settings")
+// color_bg_on_crossover = input.bool(false, "Color background on crossover")
+// color_bg_after_crossover = input.bool(true, "Color background after crossover")
+
+allow_short_2 = input.bool(false, "Allow shorting", display=display.data_window, group="MA 2 Settings")
+
+// MA 3 Settings ---
+ma_use_3 = input.bool(false, "Use MA 3?", display=display.none, group="MA 3 Settings")
+ma_sec_3 = input.symbol("", title="MA Symbol", group="MA 3 Settings", display=display.data_window)
+ma_src_3 = input.source(close, "MA source", display=display.data_window, group="MA 3 Settings")
+ma_tf_3 = input.timeframe("240", "MA Timeframe", group="MA 3 Settings", display=display.data_window)
+ma_type_3 = input.string("HULL", "MA Type", group="MA 3 Settings", options=["EMA", "SMA", "WMA", "KAMA", "HULL"])
+// ma_tf_3 = input.timeframe('D', "MA timeframe", group="MA Settings")
+ma_len_3 = input.int(300, "MA length", display=display.data_window, group="MA 3 Settings", minval=1, maxval=5000) // KAMA: 5000 
+kama_fast_len_3 = input.int(2, "MA fast length (if KAMA)", display=display.data_window, group="MA 3 Settings", minval=1, maxval=5000) // 6
+kama_slow_len_3 = input.int(26, "MA slow length (if KAMA)", display=display.data_window, group="MA 3 Settings", minval=1, maxval=5000)
+
+// dir_change_type = input.string("HIGH+LOW", "Switch MA direction when price above/below based on", group="MA 3 Settings", options = ["CLOSE", "OPEN+CLOSE", "HIGH+LOW"])
+dir_change_type_3 = input.string("OPEN+CLOSE", "Switch MA direction when price above/below based on", display=display.data_window, group="MA 3 Settings", options = ["CLOSE", "OPEN+CLOSE", "HIGH+LOW"])
+d_ma_dir_change_with_ma_3 = input.bool(false, "Switch Detrended MA Direction when underlying MA changes direction?", display=display.data_window, group="MA 3 Settings")
+d_ma_up_src_3 = input.source(close, "Move detrended MA up based on", display=display.data_window, group="MA 3 Settings")
+d_ma_down_src_3 = input.source(close, "Move detrended MA down based on", display=display.data_window, group="MA 3 Settings")
+// color_bg_on_crossover = input.bool(false, "Color background on crossover")
+// color_bg_after_crossover = input.bool(true, "Color background after crossover")
+
+allow_short_3 = input.bool(false, "Allow shorting", display=display.data_window, group="MA 3 Settings")
+
+// General settings ---
+// start_time = input.time(timestamp("1 Dec 2019 00:00"), "Start Date")
+start_time = input.time(timestamp("1 Dec 2018 00:00"), "Start Date", group="Strategy Settings")
+// start_time = input.time(timestamp("7 Jan 2022 00:00"), "Start Date", group="Strategy Settings")
+show_pnl_chars = input.bool(true, "Show character for Profit/Loss/Break-even on closed trades?", group="Strategy Settings")
+
+is_past_start_date = time >= start_time
+
+type ma_state
+	// float value
+	// bool is_above = na
+	// bool is_below = na
+	// string dir_change_type
+	// bool d_dir_change_with_ma
+	bool has_started = false
+	int dir = 0 					// 0 = initial, 1 = above, -1 = below
+	bool dir_has_changed = false
+	bool is_overlapping = false
+	color color = color.white
+	float value = na
+	string sym = ""
+	string tf = ""
+	// int d_dir = 0 					// 0 = initial, 1 = above, -1 = below
+	// bool d_dir_has_changed = false
+	// bool d_is_overlapping = false
+	// float d_value = na
+	// color d_color = color.white
+	float low// = low
+	float high// = high
+	// string sym
+	// string tf
+	// float src
+	// direction dir
+
+type ma_request
+	ma_state ma
+	ma_state d_ma
+	bool tf_changed
+
+// request security with no repaint
+fn_request(simple string sym, simple string tf, src) =>
+	// request.security(sym, tf, src)//[barstate.isrealtime ? 1 : 0])//[barstate.isrealtime ? 0 : 1]
+	// request.security(sym, tf, src[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+	val = request.security(sym, tf, src[barstate.isrealtime ? 1 : 0])
+	// if(not barstate.isrealtime and not na(val[1]))
+	// if(not barstate.isrealtime and not na(val[1]) and tf != "")
+	if(not barstate.isrealtime and not na(val[1]) and ta.change(time(tf)) == 0)
+		val[1]
+	else
+		val
+
+fn_kama(src, length, fastMA, slowMA) =>
+	volatility = math.sum(math.abs(src-src[1]), length)
+	change = math.abs(src-src[length-1])
+	er = volatility != 0 ? change/volatility : 0
+	fastSC = 2/(fastMA+1)
+	slowSC = 2/(slowMA+1)
+	sc = math.pow((er*(fastSC-slowSC))+slowSC, 2)
+
+	minLen = math.max(length, fastMA, slowMA)
+
+	kama = ta.sma(src, minLen)
+	if(bar_index >= minLen)
+		kama := kama[1]+(sc*(src-nz(kama[1])))
+
+fn_ma(kind, src, length, k_fast_len, k_slow_len) =>
+	switch kind
+		"KAMA" => fn_kama(src, length, k_fast_len, k_slow_len)
+		"SMA" => ta.sma(src, length)
+		"WMA" => ta.wma(src, length)
+		"HULL" => ta.hma(src, length)
+		=> ta.ema(src, length) // default
+
+fn_ma_for_symbol(sym, tf1, kind, src, length, k_fast_len, k_slow_len) =>
+	ma = fn_ma(kind, src, length, k_fast_len, k_slow_len)
+	tf = "1D"
+	// request.security(sym, tf, ma)
+	// request.security(sym, tf, ma)
+	// request.security(sym, tf, ma[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+	// request.security(sym, tf, tf == "" ? ma : ma[barstate.isrealtime ? 1 : 0])[(tf == "" or barstate.isrealtime) ? 0 : 1]
+	request.security(sym, tf, ma[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+	// request.security(sym, tf, tf == "" ? ma : ma[barstate.isrealtime ? 1 : 0])[(tf == "" or barstate.isrealtime) ? 0 : 1]
+	
+method is_price_above(ma_state ln) => ln.dir == 1
+method is_price_below(ma_state ln) => ln.dir == -1
+method is_overlapping(ma_state ln) => ln.is_overlapping
+
+method update_color(ma_state ln) => 
+	if(not ln.is_overlapping)
+		ln.color := ln.is_price_above() ? color.lime : color.red
+
+	ln
+
+	
+method update_direction(ma_state ln, string dir_change_type) =>
+	dir_prev = ln.dir
+	value = ln.value
+	max_open_close = math.max(open, close)
+	min_open_close = math.min(open, close)
+
+	ln.dir := switch dir_change_type
+		"CLOSE" => close > value ? 1 : close < value ? -1 : dir_prev
+		"OPEN+CLOSE" => min_open_close > value ? 1 : max_open_close < value ? -1 : dir_prev
+		"HIGH+LOW" => low > value ? 1 : high < value ? -1 : dir_prev
+
+	ln.is_overlapping := switch dir_change_type
+		"HIGH+LOW" => high >= value and low <= value
+		=> max_open_close >= value and min_open_close <= value
+
+	ln.dir_has_changed := dir_prev != 0 and ln.dir != dir_prev
+	if(not ln.has_started and ln.dir_has_changed)
+		ln.has_started := true
+
+	ln
+
+// method update(ma_state ln) =>
+// 	// updated_ln = fn_request(sym, tf, ln.update_get(value))
+// 	updated_ln = fn_request(sym, tf, ln.update_get(value, dir, dir_change_type))
+// 	if(not na(updated_ln.value))
+// 		// ln.dir_has_changed := ln.dir != 0 and updated_ln.dir != ln.dir
+// 		ln.dir_has_changed := updated_ln.dir_has_changed
+// 		ln.value := updated_ln.value
+// 		ln.dir := updated_ln.dir
+// 		ln.is_overlapping := updated_ln.is_overlapping
+	
+// 	updated_ln.value
+	
+
+method detrend(ma_state d_ln, ma_state ln, bool dir_change_with_ma, float up_src, float down_src) =>
+	// max_open_close = math.max(open, close)
+	// min_open_close = math.min(open, close)
+	if(dir_change_with_ma)
+		d_ln.dir_has_changed := ln.dir_has_changed
+		if(d_ln.dir_has_changed)
+			d_ln.is_overlapping := ln.is_overlapping
+			d_ln.dir := ln.dir
+
+	if(d_ln.dir_has_changed)
+		if(d_ln.is_price_above())
+			// d_ln.high := math.max(max_open_close, max_open_close[1])
+			d_ln.high := math.max(up_src, up_src[1])
+		else
+			// d_ln.low := math.min(min_open_close, min_open_close[1])
+			d_ln.low := math.min(down_src, down_src[1])
+	else
+		// d_ln.high := math.max(max_open_close, nz(d_ln.high, high))
+		// d_ln.low := math.min(min_open_close, nz(d_ln.low, low))
+		// d_ln.high := math.max(up_src, nz(d_ln.high, high))
+		// d_ln.low := math.min(down_src, nz(d_ln.low, low))
+		d_ln.high := ln.value >= up_src ? d_ln.high : math.max(up_src, nz(d_ln.high, high))
+		d_ln.low := ln.value <= down_src ? d_ln.low : math.min(down_src, nz(d_ln.low, low))
+
+
+	// if(d_ln.high != d_ln.high[1] or d_ln.low != d_ln.low[1])
+	// if(d_ln.high > d_ln.high[1] or d_ln.low < d_ln.low[1])
+	// if((d_ln.high > d_ln.high[1] and ln.value > d_ln.value) or (d_ln.low < d_ln.low[1] and ln.value < d_ln.value))
+	// if(d_ln.dir == ln.dir and (d_ln.high != d_ln.high[1] or d_ln.low != d_ln.low[1]))
+	// if(d_ln.dir == ln.dir and (
+	//   (d_ln.is_price_above() and d_ln.high != d_ln.high[1] and ln.value > d_ln.value) or 
+	//   (d_ln.is_price_below() and d_ln.low != d_ln.low[1] and ln.value < d_ln.value)))
+	// if(d_ln.dir == ln.dir and (
+	//   (d_ln.is_price_above() and d_ln.high != d_ln.high[1] and (d_ln.dir_has_changed or ln.value > d_ln.value)) or 
+	//   (d_ln.is_price_below() and d_ln.low != d_ln.low[1] and (d_ln.dir_has_changed or ln.value < d_ln.value))))
+	if(not ln.has_started)
+		d_ln.value := ln.value
+	else if(d_ln.dir == ln.dir and (
+	  	(d_ln.is_price_above() and (
+		  (d_ln.high > d_ln.high[1] and ln.value > d_ln.value) or 
+		  (d_ln.dir_has_changed and ln.value < d_ln.value)
+		  )) 
+		  or 
+	  	(d_ln.is_price_below() and (
+		  (d_ln.low < d_ln.low[1] and ln.value < d_ln.value) or 
+		  (d_ln.dir_has_changed and ln.value > d_ln.value) ))
+	  )
+	  )	
+		d_ln.value := ln.value
+
+	// this method incorporates the slope of the ma. If sloping up when price changes then move the detrended ma down if possible and so on
+	// should_change_value = false
+	// d_ln_low = d_ln.low
+	// d_ln_high = d_ln.high
+	// ma_value = ln.value
+	// if(d_ln.dir_has_changed) // when direction has changed
+	// 	should_change_value := (d_ln.is_price_above() and ma_value >= ma_value[1] and ln.value < d_ln.value) or
+	// 	  (d_ln.is_price_below() and ma_value <= ma_value[1] and ln.value > d_ln.value)
+	// else // direction has not changed
+	// 	should_change_value := (d_ln.is_price_above() and d_ln_high > d_ln_high[1] and ma_value > d_ln.value and ln.is_price_above()) or 
+	// 	  (d_ln.is_price_below() and d_ln_low < d_ln_low[1] and ma_value < d_ln.value and ln.is_price_below())
+
+
+	// if(should_change_value)
+	// 	d_ln.value := ln.value
+
+	ln
+
+// fn_ma_info2( 
+// 	  // ma settings
+// 	  simple string ma_type, float ma_src, simple int ma_len, simple int kama_fast_len, simple int kama_slow_len, 
+// 	  // ma direction settings
+// 	  string dir_change_type, 
+// 	  // detrended ma settings
+// 	  bool d_ma_dir_change_with_ma,
+// 	  float up_src, float down_src) =>
+	
+// 	ma_value = fn_ma(ma_type, ma_src, ma_len, kama_fast_len, kama_slow_len)
+// 	var ma_info = ma_state.new()
+// 	ma_info.value := ma_value
+// 	ma_info.update_direction(dir_change_type)
+// 	ma_info.update_color()
+
+// 	var d_ma_info = ma_info.copy()
+// 	d_ma_info.value := nz(d_ma_info.value, ma_info.value)
+// 	d_ma_info.update_direction(dir_change_type)
+// 	d_ma_info.detrend(ma_info, d_ma_dir_change_with_ma, up_src, down_src)
+// 	d_ma_info.update_color()
+
+// 	array.from(ma_info, d_ma_info)
+
+fn_ma_info(
+	  // symbol and time frame
+	  simple string sym, simple string tf, 
+	  // ma settings
+	  simple string ma_type, float ma_src, simple int ma_len, simple int kama_fast_len, simple int kama_slow_len, 
+	  // ma direction settings
+	  string dir_change_type, 
+	  // detrended ma settings
+	  bool d_ma_dir_change_with_ma,
+	  float up_src, float down_src) =>
+	
+	ma_value = fn_ma(ma_type, ma_src, ma_len, kama_fast_len, kama_slow_len)
+	// ma_info_get = fn_ma_info(
+	//   ma_value, 
+	//   dir_change_type, 
+	//   d_ma_dir_change_with_ma)
+
+	// ma_info = fn_request(sym, tf, ma_info_get)
+	
+	var ma_info = ma_state.new(sym=sym, tf=tf)
+	ma_info.value := ma_value
+	ma_info.update_direction(dir_change_type)
+	ma_info.update_color()
+
+	var d_ma_info = ma_info.copy()
+	d_ma_info.value := nz(d_ma_info.value, ma_info.value)
+	d_ma_info.update_direction(dir_change_type)
+	d_ma_info.detrend(ma_info, d_ma_dir_change_with_ma, up_src, down_src)
+	d_ma_info.update_color()
+
+	// mas1 = array.from(ma_info, ma_info)
+	mas = fn_request(sym, tf, array.from(ma_info, d_ma_info))
+
+	tf_changed = ta.change(time(tf)) != 0
+	ret = ma_request.new(tf_changed=tf_changed)
+	if(na(mas))
+		blank_ma_info = ma_state.new()
+		// [blank_ma_info, blank_ma_info]
+		ret.ma := blank_ma_info
+		ret.d_ma := blank_ma_info
+	else
+		// [mas.get(0), mas.get(1)]
+		ret.ma := mas.get(0)
+		ret.d_ma := mas.get(1)
+
+	ret
+
+
+// MA's
+// #1
+
+// m = request.security(ma_sec_1, ma_tf_1, fn_test_request_type())
+// request.security(sym, tf, ma[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+// ma_value_1 = fn_ma(ma_type_1, ma_src_1, ma_len_1, kama_fast_len_1, kama_slow_len_1)
+// ma_info_get_1 = fn_ma_info(
+//   ma_value_1, 
+//   dir_change_type_1, 
+//   d_ma_dir_change_with_ma_1)
+
+// ma_info_1 = fn_request(ma_sec_1, ma_tf_1, ma_info_get_1)
+// ma_1 = ma_info_1.get(0)
+// d_ma_1 = ma_info_1.get(1)
+
+ma_1 = fn_ma_info(
+  // symbol and time frame
+  ma_sec_1, ma_tf_1, 
+  // ma settings
+  ma_type_1, ma_src_1, ma_len_1, kama_fast_len_1, kama_slow_len_1,
+  // detrended ma settings
+  dir_change_type_1, 
+  d_ma_dir_change_with_ma_1,
+  d_ma_up_src_1, d_ma_down_src_1)
+
+ma_2 = fn_ma_info(
+  // symbol and time frame
+  ma_sec_2, ma_tf_2, 
+  // ma settings
+  ma_type_2, ma_src_2, ma_len_2, kama_fast_len_2, kama_slow_len_2,
+  // detrended ma settings
+  dir_change_type_2, 
+  d_ma_dir_change_with_ma_2,
+  d_ma_up_src_2, d_ma_down_src_2)
+
+ma_3 = fn_ma_info(
+  // symbol and time frame
+  ma_sec_3, ma_tf_3, 
+  // ma settings
+  ma_type_3, ma_src_3, ma_len_3, kama_fast_len_3, kama_slow_len_3,
+  // detrended ma settings
+  dir_change_type_3, 
+  d_ma_dir_change_with_ma_3,
+  d_ma_up_src_3, d_ma_down_src_3)
+
+// strategy
+is_long = strategy.position_size > 0
+is_short = strategy.position_size < 0
+should_buy = false
+// should_sell = false
+
+mas = array.new<ma_request>(0)
+if(ma_use_1)
+	mas.push(ma_1)
+if(ma_use_2)
+	mas.push(ma_2)
+if(ma_use_3)
+	mas.push(ma_3)
+
+// mas = array.from(d_ma_1)
+// var mas = array.from(d_ma_2)
+// var mas = array.from(d_ma_1, d_ma_info_2)
+num_mas = mas.size()
+pos_ratio = 1 / num_mas
+opentrades = strategy.opentrades
+// capital = (strategy.initial_capital + strategy.netprofit) * ((num_mas - opentrades) / num_mas)
+capital = (strategy.equity - strategy.openprofit) * ((num_mas - opentrades) / num_mas)
+
+if(is_past_start_date)
+	
+	buy_capital = capital * (1 / (num_mas - opentrades))
+	buy_qty = buy_capital / close
+	num_up = 0
+	has_any_dir_changed = false
+	for [i, ma] in mas
+		d_ma = ma.d_ma
+		
+	// 	num_up += d_ma.is_price_above() ? 1 : 0
+
+	// 	if(not has_any_dir_changed and not d_ma.dir_has_changed)
+	// 		continue
+
+	// 	has_any_dir_changed := true	
+	
+	// if(has_any_dir_changed)
+	// 	if(num_up == num_mas)
+	// 		if(not is_long)
+	// 			strategy.entry("buy", strategy.long)
+	// 			should_buy := true
+	// 			opentrades += 1
+	// 	else if(is_long)
+	// 		strategy.close("buy", immediately=true)
+	// 		opentrades -= 1
+
+		if(not ma.tf_changed or not(d_ma.dir_has_changed))// or ta.change(time(d_ma.tf)) == 0)
+			continue
+		
+		nm_long = "long#" + str.tostring(i + 1)
+		if(opentrades < num_mas and d_ma.is_price_above())// and (i != 0 or ma_2.d_ma.is_price_above()))
+			strategy.entry(nm_long, strategy.long, qty=buy_qty)
+			should_buy := true
+			opentrades += 1
+		if(d_ma.is_price_below())
+			if(not allow_short_1 and opentrades > 0)
+				strategy.close(nm_long, immediately=true)
+				opentrades -= 1
+			else if(allow_short_1 and opentrades < num_mas)
+				nm_short = "short#" + str.tostring(i + 1)
+				strategy.entry(nm_short, strategy.short)
+		
+
+// bar_index_diff_since_cross = bar_index - last_cross_index
+// highest_since_cross = ta.highest(ma_src_1, bar_index_diff_since_cross)
+// lowest_since_cross = ta.lowest(ma_src_1, bar_index_diff_since_cross)
+
+// has_crossed_condition = has_crossed
+// highest_since_cross = ta.highest(high, nz(ta.barssince(has_crossed_condition) + 1, 1))
+// lowest_since_cross = ta.lowest(low, nz(ta.barssince(has_crossed_condition) + 1, 1))
+// lowest_since_cross = nz(ta.barssince(has_crossed_condition) + 1, 1)
+
+
+// if(has_crossed)
+// 	if(high_above_ma)
+
+// plot(d_high_1, title="d_high_1", color=color.green)
+// plot(d_low_1, title="d_low_1", color=color.orange)
+
+// bgcolor(color_bg_on_crossover and d_ma_1.is_overlapping() ? color.new(bg_color_1, 90) : na)
+// bgcolor(not color_bg_after_crossover or not d_ma_1.dir_has_changed ? na : color.new(d_ma_color_1, 85))
+
+openprofit = strategy.openprofit
+netprofit = strategy.netprofit
+closedtrades = strategy.closedtrades
+
+// securityNoRepaint(sym, tf, src) =>
+// 	changed = ta.change(time(tf)) != 0
+// 	request.security(sym, tf, src[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+//     // request.security(sym, tf, src[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+
+// tf = "1D"
+// t1 = close
+// t2 = request.security("", tf, close[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+// // t3 = request.security("", tf, close[barstate.isrealtime ? 1 : 0])[barstate.isrealtime ? 0 : 1]
+// t3 = securityNoRepaint("", tf, close)
+
+// changed = ta.change(time(tf)) != 0
+
+// plot(t1, title="close", color=color.teal)
+// plot(t2, title="req(close)", color=color.aqua)
+// plot(t3, title="secNoRepaint", color=color.green)
+// plotchar(changed, title="upper tf changed", char="", location=location.top, color=changed ? color.teal : color.fuchsia, display=display.data_window)
+// plotchar(not(na(m)) ? m.tes : na, title="m.tes", char="", location=location.top, color=m.tes ? color.teal : color.fuchsia, display=display.data_window)
+// plot(mas.includes(d_ma_1) ? ma_1 : na, title="ma #1", color=d_ma_1.color)
+// plot(mas.includes(d_ma_info_2) ? ma_2 : na, title="ma #2", color=d_ma_info_2.color, linewidth=3)
+
+// plot(ma_1.value, title="ma #1", color=ma_1.color, linewidth=3)
+// plot(mas.includes(d_ma_1) ? ma_1 : na, title="ma #1", color=d_ma_1.color, linewidth=3)
+plot(mas.includes(ma_1) ? ma_1.d_ma.value : na, title="detrended ma #1", color=ma_1.d_ma.color)
+// plot(mas.includes(ma_1) ? ma_1.d_ma.low : na, title="detrended ma #1 low", color=color.white, style=plot.style_cross)
+// plot(ma_2.value, title="ma #2", color=ma_1.color, linewidth=3)
+plot(mas.includes(ma_2) ? ma_2.d_ma.value : na, title="detrended ma #2", color=ma_2.d_ma.color, linewidth=2)
+// plot(mas.includes(ma_2) ? ma_2.ma.value : na, title="ma #2", color=ma_2.ma.color)
+// plot(mas.includes(ma_2) ? ma_2.d_ma.low : na, title="d ma #2 low", color=ma_2.d_ma.color, display=display.status_line+display.data_window)
+plot(mas.includes(ma_3) ? ma_3.d_ma.value : na, title="detrended ma #3", color=ma_3.d_ma.color, linewidth=3)
+// plot(mas.includes(d_ma_info_2) ? d_ma_2 : na, title="d ma #2", color=d_ma_info_2.color)
+// plot(mas.includes(d_ma_1) ? ta.change(time(d_ma_2.tf)) : na, title="ma #2 change?", color=d_ma_2.color)
+// plotchar(ma_1.tf_changed, title="tf_changed #1", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(ma_2.tf_changed, title="tf_changed #2", char="", location=location.top, color=color.white, display=display.data_window)
+// plotchar(ma_1.d_ma.dir_has_changed, title="dir_has_changed", char="", location=location.top, color=color.white, display=display.data_window)
+
+// detrended high and low
+// plot(mas.includes(ma_1) ? ma_1.d_ma.high : na, title="detrended ma #1 high", color=color.white, style=plot.style_cross, display=display.data_window)
+// plot(mas.includes(ma_2) ? ma_2.d_ma.high : na, title="detrended ma #2 high", color=color.white, style=plot.style_cross, display=display.data_window)
+// plot(mas.includes(ma_3) ? ma_3.d_ma.high : na, title="detrended ma #3 high", color=color.white, style=plot.style_cross, display=display.data_window)
+// plot(mas.includes(ma_1) ? ma_1.d_ma.low : na, title="detrended ma #1 low", color=color.white, style=plot.style_cross, display=display.data_window)
+// plot(mas.includes(ma_2) ? ma_2.d_ma.low : na, title="detrended ma #2 low", color=color.white, style=plot.style_cross, display=display.data_window)
+// plot(mas.includes(ma_3) ? ma_3.d_ma.low : na, title="detrended ma #3 low", color=color.white, style=plot.style_cross, display=display.data_window)
+
+plotchar(strategy.position_size, title="position_size", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(strategy.position_avg_price, title="position_avg_price", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(strategy.opentrades, title="opentrades", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(strategy.closedtrades, title="closedtrades", char="", location=location.top, color=color.white, display=display.data_window)
+plotchar(openprofit, title="open profit", char="", location=location.top, color=color.orange, display=display.data_window)
+plotchar(netprofit, title="net profit", char="", location=location.top, color=color.orange, display=display.data_window)
+plotchar(strategy.equity, title="equity", char="", location=location.top, color=color.yellow, display=display.data_window)
+plotchar(capital, title="capital", char="", location=location.top, color=color.green, display=display.data_window)
+
+// pnl
+plotchar(show_pnl_chars and netprofit > netprofit[1], title = "Closed in Profit Character", char = "$", location = location.bottom, color = color.lime, size = size.tiny, display=display.pane)
+// plotchar(show_pnl_chars and pnl_changed and netprofit == netprofit[1], title="Closed at Break-even Character", char="0", location=location.bottom, color=color.silver, size=size.tiny, display=display.pane)
+plotchar(show_pnl_chars and closedtrades > closedtrades[1] and netprofit == netprofit[1], title = "Closed at Break-even Character", char = "0", location = location.bottom, color = color.silver, size = size.tiny, display=display.pane)
+// plotchar(show_pnl_chars and not na(netprofit[1]) and netprofit < netprofit[1], title = "Closed at Loss Character", char = "L", location = location.bottom, color = color.fuchsia, size = size.tiny, display=display.pane)
+plotchar(show_pnl_chars and not na(netprofit[1]) and netprofit < netprofit[1] and not should_buy[1], title = "Closed at Loss Character", char = "L", location = location.bottom, color = color.fuchsia, size = size.tiny, display=display.pane)

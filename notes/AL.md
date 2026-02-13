@@ -1,0 +1,3 @@
+With the advent of LLMs a new possibility comes up. This ties into my idea of having multiple agents trading and communicating with each other and possibly to a leader. Like a flock of birds migrating south/north, each adjusting their direction, speed, etc. to stick with the formation and getting there. Getting cover from the others
+
+Instead of deterministic, fixed code, maybe a hybrid that can have the trades/positions done or overseen by AI that makes adjustments, opens/closes positions, etc. to fulfill the overall goals of the overall strategy

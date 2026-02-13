@@ -1,0 +1,40 @@
+{
+  "name": "@tradingbot/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run src/main/__tests__/integration.test.ts",
+    "test:e2e": "playwright test",
+    "dev:renderer": "vite --config renderer.vite.config.ts",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tradingbot/core-types": "0.1.0",
+    "@tradingbot/mock-data": "0.1.0",
+    "@tradingbot/ui-kit": "0.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^24.9.1",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "electron": "^40.4.0",
+    "electron-vite": "^4.0.0",
+    "jsdom": "^27.0.1",
+    "tailwindcss": "^4.1.16",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  }
+}

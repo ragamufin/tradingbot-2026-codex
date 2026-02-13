@@ -1,0 +1,37 @@
+{
+  "name": "tradingbot-2026-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=11.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently \"npm:dev:desktop\" \"npm:dev:ops\"",
+    "dev:desktop": "npm run dev -w @tradingbot/desktop",
+    "dev:ops": "npm run dev -w @tradingbot/ops",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "test:unit": "npm run test:unit --workspaces --if-present",
+    "test:integration": "npm run test:integration --workspaces --if-present",
+    "test:e2e": "npm run test:e2e --workspaces --if-present",
+    "test:headed": "HEADED=1 npm run test:e2e",
+    "prepare": "playwright install --with-deps"
+  },
+  "dependencies": {
+    "ccxt": "^4.5.38",
+    "protobufjs": "^8.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}
